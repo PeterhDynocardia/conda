@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 from os.path import abspath, expanduser, expandvars
 from typing import TYPE_CHECKING
 
@@ -25,7 +26,7 @@ def configure_parser(sub_parsers: _SubParsersAction, **kwargs) -> ArgumentParser
     summary = "Compare packages between conda environments."
     description = summary
     epilog = dals(
-        """
+        """++
         Examples:
 
         Compare packages in the current environment with respect
@@ -37,6 +38,10 @@ def configure_parser(sub_parsers: _SubParsersAction, **kwargs) -> ArgumentParser
         to 'environment.yml' in a different directory::
 
             conda compare -n myenv path/to/file/environment.yml
+            
+        Compare packages between two conda environments with the -diff flag::
+
+            conda compare -diff env1 env2
 
         """
     )
@@ -55,7 +60,28 @@ def configure_parser(sub_parsers: _SubParsersAction, **kwargs) -> ArgumentParser
         action="store",
         help="Path to the environment file that is to be compared against.",
     )
+    
+
+    p.add_argument(
+        "-diff",
+        action="store_true",
+        help="Show differences between two environments.",
+    )
+    p.add_argument(
+        "env1",
+        nargs=1,
+        action="store",
+        help="First environment to compare against if using -diff.",
+    )
+    
+    p.add_argument(
+        "env2",
+        nargs=1,
+        action="store",
+        help="Second environment to compare against if using -diff.",
+    )
     p.set_defaults(func="conda.cli.main_compare.execute")
+
 
     return p
 
@@ -99,13 +125,61 @@ def compare_packages(active_pkgs, specification_pkgs) -> tuple[int, list[str]]:
     return int(miss), output
 
 
-def execute(args: Namespace, parser: ArgumentParser) -> int:
+    
+def check_diff_installed():
+    if subprocess.call(["which", "diff"], stdout=subprocess.PIPE, stderr=subprocess.PIPE) != 0:
+        print("diff command could not be found. Please install it to proceed.")
+        exit(1)
+
+def display_table(diff_output, env1, env2):
+    print("\nPackage Differences:\n")
+    print(f"{'Package':<40} {env1:<20} {env2:<20}")
+    print(f"{'-------':<40} {'----':<20} {'----':<20}")
+
+    for line in diff_output.splitlines():
+        if line.startswith('<'):
+            package = line[2:]
+            print(f"\033[41m{package:<40} {'Present':<20} {'Absent':<20}\033[0m")
+        elif line.startswith('>'):
+            package = line[2:]
+            print(f"\033[44m{package:<40} {'Absent':<20} {'Present':<20}\033[0m")
+
+def find_conda_setup():
+    conda_path = subprocess.check_output(["which", "conda"]).decode("utf-8").strip()
+    conda_setup = os.path.join(os.path.dirname(os.path.dirname(conda_path)), 'etc', 'profile.d', 'conda.sh')
+    
+    return conda_setup
+    
+def compare_envs(env1, env2):
+    check_diff_installed()
+
+    # Source the conda setup script
+    conda_setup = find_conda_setup()
+    command = f"source {conda_setup} && conda activate {env1} && conda list > env1_packages.txt && conda activate {env2} && conda list > env2_packages.txt && conda deactivate"
+    os.system(command)
+
+    # Generate the differences using diff
+    result = subprocess.run(["diff", "env1_packages.txt", "env2_packages.txt"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    diff_output = result.stdout.decode('utf-8')
+
+    # Display the differences in a color-coded table
+    display_table(diff_output, env1, env2)
+
+    # Clean up temporary files
+    os.remove("env1_packages.txt")
+    os.remove("env2_packages.txt")
+
+def execute(args, parser):
     from ..base.context import context
     from ..env import specs
     from ..exceptions import EnvironmentLocationNotFound, SpecNotFound
     from ..gateways.connection.session import CONDA_SESSION_SCHEMES
     from ..gateways.disk.test import is_conda_environment
     from .common import stdout_json
+
+    if args.diff:
+        compare_envs(args.env1, args.env2)
+        return 0
 
     prefix = context.target_prefix
     if not is_conda_environment(prefix):
